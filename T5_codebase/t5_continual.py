@@ -12,6 +12,9 @@ from transformers import AdamW
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 from sklearn.metrics import matthews_corrcoef, f1_score
 
+from torch.nn.functional import kl_div
+from torch import log_softmax, softmax
+
 
 class ResMLP(torch.nn.Module):
     def __init__(self, 
@@ -174,6 +177,7 @@ class T5ContinualLearner:
             'dbpedia_14': 5,
             'amazon': 2,
             'yelp_review_full': 2,
+            'example': 2,
         }
         self.task_list = task_list
 
@@ -379,6 +383,7 @@ class T5ContinualLearner:
             dataloader_train = ds2.get_final_ds(**data_params, k=k, split='train')
             print('k = ', k, '  k-val = ',k_val)
             val_split = 'validation' if (task in self.glue_datasets) or (task in self.superglue_datasets) else 'test'
+            
             dataloaders = ds2.get_final_ds(**data_params, k=k_val,
                                            split=val_split, return_test=self.get_test_subset)
 
@@ -420,14 +425,21 @@ class T5ContinualLearner:
         lm_labels[lm_labels[:, :] == tokenizer.pad_token_id] = -100
 
         inputs_embeds = model.encoder.embed_tokens(batch["source_ids"])
+        pad_embed = model.encoder.embed_tokens.weight[tokenizer.pad_token_id].unsqueeze(0)
 
         k = inputs_embeds.shape[0]
+
         if embed_prompt:
             prompt = mlp(model.prompt)
         else:
             prompt = model.prompt
-
-        if progressive:
+        
+        compression = True
+        if compression:
+            full_prefix_len = prompt.shape[0]
+            inputs_embeds_prompt = torch.concat([prompt.repeat(k, 1, 1), pad_embed.repeat(k, self.seq_len-full_prefix_len, 1)], axis=1)
+            
+        elif progressive:
             inputs_embeds = torch.concat([prompt.repeat(k, 1, 1),
                                           self.previous_prompts.repeat(k, 1, 1),
                                           inputs_embeds], axis=1)[:,:self.seq_len]
@@ -437,27 +449,80 @@ class T5ContinualLearner:
                                           inputs_embeds], axis=1)[:,:self.seq_len]
             full_prefix_len = prompt.shape[0]
 
-        source_mask_updated = torch.concat( (batch["source_mask"][0][0].repeat(k,full_prefix_len),
-                                             batch["source_mask"]), axis=1)[:,:self.seq_len]
-
+        # source_mask_updated = torch.concat( (batch["source_mask"][0][0].repeat(k,full_prefix_len),
+        #                                      batch["source_mask"]), axis=1)[:,:self.seq_len]
+        source_mask_prompt = torch.concat( (torch.ones(k,full_prefix_len).to(self.device), 
+                                            torch.zeros(k, self.seq_len-full_prefix_len).to(self.device)), axis=1)
+        
+        # import ipdb; ipdb.set_trace()
+        # encoder_outputs = model.encoder(
+        #                         attention_mask=source_mask_updated,
+        #                         inputs_embeds=inputs_embeds,
+        #                         head_mask=None,  
+        #                         output_attentions=None,  
+        #                         output_hidden_states=None, 
+        #                         return_dict=None,  
+        #                     )
+        encoder_outputs_prompt = model.encoder(
+                                attention_mask=source_mask_prompt,
+                                inputs_embeds=inputs_embeds_prompt,
+                                head_mask=None,  
+                                output_attentions=None,  
+                                output_hidden_states=None, 
+                                return_dict=None,  
+                            )
         encoder_outputs = model.encoder(
-                                attention_mask=source_mask_updated,
+                                attention_mask=batch["source_mask"],
                                 inputs_embeds=inputs_embeds,
                                 head_mask=None,  
                                 output_attentions=None,  
                                 output_hidden_states=None, 
                                 return_dict=None,  
                             )
-
+        # outputs = model(
+        #     input_ids=batch["source_ids"],
+        #     attention_mask=source_mask_updated, 
+        #     labels=lm_labels,
+        #     decoder_attention_mask=batch['target_mask'],
+        #     encoder_outputs=encoder_outputs,
+        # )
+        
+        outputs_prompt = model(
+            input_ids=batch["source_ids"],
+            attention_mask=source_mask_prompt, 
+            labels=lm_labels,
+            decoder_attention_mask=batch['target_mask'],
+            encoder_outputs=encoder_outputs_prompt,
+        )
         outputs = model(
             input_ids=batch["source_ids"],
-            attention_mask=source_mask_updated, 
+            attention_mask=batch["source_mask"], 
             labels=lm_labels,
             decoder_attention_mask=batch['target_mask'],
             encoder_outputs=encoder_outputs,
         )
-        loss = outputs[0]
+        # loss = outputs[0]
+        
 
+        logits_prompt = outputs_prompt.logits
+        log_probs_prompt = torch.nn.functional.log_softmax(logits_prompt, dim=-1)
+
+        # Calculate the log probability of the generated text
+        log_probability_prompt = 0
+        for i, token_id in enumerate(batch['target_ids'][0][1:]):
+            log_probability_prompt += log_probs_prompt[0, i, token_id].item()
+
+
+        logits = outputs.logits
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+        # Calculate the log probability of the generated text
+        log_probability = 0
+        for i, token_id in enumerate(batch['target_ids'][0][1:]):
+            log_probability += log_probs[0, i, token_id].item()
+
+
+        loss = kl_div(log_probs_prompt, log_probs, reduction='batchmean', log_target=True)
         return loss
 
 

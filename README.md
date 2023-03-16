@@ -160,3 +160,17 @@ If you use our code in your research, please cite our work:
   year={2023}
 }
 -->
+
+srun -n 1 -w c59 --pty /bin/bash
+
+export HF_DATASETS_CACHE=/mnt/beegfs/jiasheng/new_datasets
+export TRANSFORMERS_CACHE=/mnt/beegfs/jiasheng/new_cache
+python train_t5_cl.py --task_list imdb cb sst2 dbpedia_14 --select_k_per_class 1000 \
+--lr 0.3 --num_epochs 10 --freeze_weights 1 --prefix_len 10 \
+--model_name t5-large --early_stopping 1 \
+--save_name T5_experiment --save_dir /mnt/beegfs/jiasheng/progressiveprompts_save
+
+python train_t5_cl.py --task_list example --select_k_per_class 1000 \
+--lr 0.3 --num_epochs 300 --freeze_weights 1 --prefix_len 64 \
+--model_name google/flan-t5-base --early_stopping 1 \
+--save_name T5_experiment --save_dir /mnt/beegfs/jiasheng/progressiveprompts_save

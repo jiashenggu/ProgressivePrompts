@@ -56,6 +56,7 @@ class T5Dataset:
             "yahoo": ("content", None),
             "dbpedia": ("content", None),
             "amazon": ("content", None),
+            "example": ("prompt", None),
         }
         
         # Label text for T5 tasks
@@ -101,6 +102,7 @@ class T5Dataset:
                         "meanoftransportation", "building", "naturalplace", "village", "animal",
                         "plant", "album", "film", "writtenwork"),
             "amazon": ("terrible", "bad", "middle", "good", "wonderful"),
+            "example": ("terrible", "bad", "middle", "good", "wonderful"),
         }
 
         self.task = task
@@ -177,13 +179,15 @@ class T5Dataset:
 
         if len(prefix_list)>0:
             text = (' ').join(prefix_list) + ' ' + text
+        
         source = tokenizer(text.strip()+' </s>',
                           truncation=True,
                           #padding=False,
                           padding='max_length',
                           max_length=max_length)
-
-        if task=='stsb':
+        if task == 'example':
+            target = examples['content']
+        elif task=='stsb':
             target = str(examples[label_key])[:3]
         elif task=='record':
             target = '; '.join(examples[label_key])
@@ -195,7 +199,7 @@ class T5Dataset:
         target = tokenizer(
                   target, max_length=max_length_target, pad_to_max_length=True, #return_tensors="pt"
                 )
-
+        
         dict_final = {"source_ids": source['input_ids'],
                       "source_mask": source['attention_mask'],
                       "target_ids": target['input_ids'],
@@ -232,8 +236,13 @@ class T5Dataset:
         Returns:
             Dataloader: Torch Dataloader with preprocessed input text & label.
         """
-        
-        if task in ['amazon']: # amazon not available with hugging face
+        if task in ['example']:
+            df = pd.read_csv('../datasets/src/data/'+'amazon'+'/'+split+'.csv', header=None)
+            df = df.rename(columns={0: "label", 1: "title", 2: "content"})
+            df['prompt'] = "Frank and Cindy are bakers in the city of Paris, France. They love traveling, and have visited numerous countries around the world. They enjoy cruises, hiking, and visiting cities with history and flair. Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. They have not visited Africa, but hope to someday. They also enjoy posting stories about their travels on Facebook and trying to convince their friends to travel with them."
+            df['label'] = df['label'] - 1
+            dataset = datasets.Dataset.from_pandas(df)
+        elif task in ['amazon']: # amazon not available with hugging face
             df = pd.read_csv('../datasets/src/data/'+task+'/'+split+'.csv', header=None)
             df = df.rename(columns={0: "label", 1: "title", 2: "content"})
             df['label'] = df['label'] - 1
