@@ -27,14 +27,14 @@ seq_len = 512
 model.eval()
 
 
-# input_text = 'Repeat the following text: Frank and Cindy are bakers in the city of Paris, France. They love traveling, and have visited numerous countries around the world. They enjoy cruises, hiking, and visiting cities with history and flair. Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. They have not visited Africa, but hope to someday. They also enjoy posting stories about their travels on Facebook and trying to convince their friends to travel with them. '
-input_text = '''Frank and Cindy are bakers in the city of Paris, France. 
-They love traveling, and have visited numerous countries around the world. 
-They enjoy cruises, hiking, and visiting cities with history and flair. 
-Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. 
-Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. 
-Now repeat the paragraph above:'''
-
+# input_text = 'Frank and Cindy are bakers in the city of Paris, France. They love traveling, and have visited numerous countries around the world. They enjoy cruises, hiking, and visiting cities with history and flair. Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. They have not visited Africa, but hope to someday. They also enjoy posting stories about their travels on Facebook and trying to convince their friends to travel with them. '
+# input_text = '''Frank and Cindy are bakers in the city of Paris, France. 
+# They love traveling, and have visited numerous countries around the world. 
+# They enjoy cruises, hiking, and visiting cities with history and flair. 
+# Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. 
+# Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. 
+# Now repeat the paragraph above:'''
+input_text = 'Now repeat the text:'
 
 
 
@@ -46,21 +46,22 @@ soft_prompt = np.load('/mnt/beegfs/jiasheng/progressiveprompts_save/T5_experimen
 # convert to tensor
 soft_prompt = torch.from_numpy(soft_prompt).to(device)
 soft_prompt = soft_prompt.unsqueeze(0)
+print(soft_prompt)
 # import ipdb; ipdb.set_trace()
 # Get input embeddings and prepend the soft prompt
 input_embeddings = model.get_input_embeddings()(input_ids)
-# input_embeddings_with_soft_prompt = torch.cat([soft_prompt, input_embeddings], dim=1)
+input_embeddings_with_soft_prompt = torch.cat([soft_prompt, input_embeddings], dim=1)
 
 # Generate the output
 with torch.no_grad():
-    output = model.generate(inputs_embeds=input_embeddings, min_length=50, max_length=100)
+    output = model.generate(inputs_embeds=input_embeddings_with_soft_prompt, min_length=50, max_length=100)
     print(output[0].shape)
 
 # Decode the generated output
 decoded_output = tokenizer.decode(output[0], skip_special_tokens=True)
 
-print(input_text)
-print(decoded_output)
+print("input_text: " + input_text)
+print("decoded_output: " + decoded_output)
 
 # from transformers import AutoTokenizer, T5ForConditionalGeneration
 

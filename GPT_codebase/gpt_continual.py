@@ -5,17 +5,18 @@ import numpy as np
 from tqdm.auto import tqdm
 import logging, os, argparse
 
-import t5_dataset
+import gpt_dataset
 from itertools import cycle
 from copy import deepcopy
 from transformers import AdamW
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from sklearn.metrics import matthews_corrcoef, f1_score
 
 from torch.nn.functional import kl_div
 from torch import log_softmax, softmax
 
-
+from accelerate import Accelerator
+accelerator = Accelerator()
 class ResMLP(torch.nn.Module):
     def __init__(self, 
                  bottleneck_size,
@@ -29,7 +30,7 @@ class ResMLP(torch.nn.Module):
             module_type (str, optional): Type of MLP to be used. 
                 Currently supports 1-layer and 2-layer MLPs, and simple transformer layer ('MLP1'/'MLP2'/'transformer'). 
                 Defaults to 'MLP1'.
-            emb_dimension (int, optional): Dimension of T5 model embeddings. Defaults to 512 (T5-small embedding dimension).
+            emb_dimension (int, optional): Dimension of GPT model embeddings. Defaults to 512 .
             residual (bool, optional): Whether to use residual connection in MLP. Defaults to True.
         """
         super().__init__()
@@ -74,7 +75,7 @@ class ResMLP(torch.nn.Module):
 
 
 
-class T5ContinualLearner:
+class GPTContinualLearner:
     def __init__(self,
                  model_name,
                  task_list,
@@ -97,9 +98,9 @@ class T5ContinualLearner:
                  memory_perc=0.0,
                  ):
         
-        """Class for CL & prompt tuning experiments with T5 model.
+        """Class for CL & prompt tuning experiments with GPT model.
         Args:
-            model_name (str): T5 model type to use (e.g. base/small/large etc.)
+            model_name (str): GPT model type to use (e.g. base/small/large etc.)
             task_list (List[str]): list of downstream tasks to be trained on. In case of 1 task - regular training.
             batch_size (int, optional): Batch size used. Defaults to 8.
             select_k_per_class (int, optional): Limit data to k samples/class. Defaults to -1 (keep original dataset size).
@@ -124,7 +125,7 @@ class T5ContinualLearner:
             freeze_weights (bool, optional): Whether to freeze base model weights. 
                 Model weights need to be frozen for prompt tuning (i.e. True)! Defaults to False.
             freeze_except (str, optional): If freeze_weights, do not freeze weights that contain this text. 
-                Defaults to 'shared' (will avoid freezing word embeddings layer in T5).
+                Defaults to 'shared' (will avoid freezing word embeddings layer in GPT).
             lr (float, optional): Prompt (model) learning rate. Defaults to 0.1.
             weight_decay (float, optional): Prompt (model) weight decay coefficient. Defaults to 0.00.
             prompt_name (str, optional): Shared name for prompt virtual tokens (when added to the vocab). 
@@ -151,32 +152,6 @@ class T5ContinualLearner:
                               'mnli_mismatched', 'mnli_matched', 'qnli', 'rte', 'wnli', 'ax']
         self.superglue_datasets = ['copa', 'boolq', 'wic', 'wsc', 'wsc_bool', 'cb', 'record', 'multirc', 'rte_superglue']
         self.task_to_target_len = {
-            'rte': 5,
-            'mrpc': 5,
-            'sst2': 2,
-            'qqp': 5,
-            'cola': 5,
-            'qnli': 5,
-            'mnli': 5,
-            'stsb': 3,
-
-            'wic': 2,
-            'boolq': 2,
-            'copa': 2,
-            'wsc': 3,
-            'wsc_bool': 2,
-            'cb': 5,
-            'multirc': 5,
-            'record': 10,
-            'rte_superglue': 5,
-
-            'imdb': 2,
-
-            'ag_news': 2,
-            'yahoo_answers_topics': 5,
-            'dbpedia_14': 5,
-            'amazon': 2,
-            'yelp_review_full': 2,
             'example': 2,
         }
         self.task_list = task_list
@@ -190,13 +165,23 @@ class T5ContinualLearner:
         self.early_stopping = early_stopping
 
         if torch.cuda.is_available():
-            self.device = torch.device("cuda")
+            # self.device = torch.device("cuda")
+            self.device = accelerator.device
         else:
             self.device = torch.device("cpu")
 
-        self.model_name = model_name # e.g. "t5-large"
-        self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-        self.tokenizer = T5Tokenizer.from_pretrained(model_name)
+        self.model_name = model_name # e.g. "gpt2"
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.add_special_tokens({'sep_token': '<SEP>'})
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, bos_token_id=self.tokenizer.bos_token_id,
+                                            eos_token_id=self.tokenizer.eos_token_id,
+                                            sep_token_id=self.tokenizer.sep_token_id,
+                                            pad_token_id=self.tokenizer.pad_token_id)
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        
+        
+        
         # Freezing model weights for prompt tuning
         if freeze_weights:
             print('Freezing weights')
@@ -241,6 +226,7 @@ class T5ContinualLearner:
         # Get task -> data dictionary for CL training
         self.get_test_subset = get_test_subset
         self.tasks_data_dict = self.get_tasks_data_dict(memory_perc=memory_perc)
+        self.model, self.optimizer = accelerator.prepare(self.model, self.optimizer)
 
 
     # Create optimizer 
@@ -283,7 +269,7 @@ class T5ContinualLearner:
             self.prefix_MLPs = None
         else:
             print('Using MLP reparametrization with bottleneck = ', bottleneck_size)
-            N = self.model.encoder.embed_tokens.weight.shape[1]
+            N = self.model.get_input_embeddings().weight.shape[1]
             self.prefix_MLPs = {t: ResMLP(bottleneck_size=bottleneck_size,
                                           module_type=prefix_MLP,
                                           #layer_norm=layer_norm,
@@ -296,13 +282,13 @@ class T5ContinualLearner:
     # Initialize new task prompt from random vocab. tokens
     def init_new_prompt(self, prompt_len):
         model = self.model
-        N = model.encoder.embed_tokens.weight.shape[0]
+        N = model.get_input_embeddings().weight.shape[0]
         prompt_weigths = []
 
         for i in range(prompt_len):
             with torch.no_grad():
                 j = np.random.randint(N) # random token
-                w = deepcopy(model.encoder.embed_tokens.weight[j].detach().cpu().numpy())
+                w = deepcopy(model.get_input_embeddings().weight[j].detach().cpu().numpy())
                 prompt_weigths.append(w)
         prompt_weigths = np.array(prompt_weigths)
         return prompt_weigths
@@ -372,7 +358,7 @@ class T5ContinualLearner:
                            'target_len': self.task_to_target_len[task],
                            'prefix_list': [], # we are using vector prefix (instead of tokenization)
                            }
-            ds2 = t5_dataset.T5Dataset(self.tokenizer, task)
+            ds2 = gpt_dataset.GPTDataset(self.tokenizer, task)
             if task not in ['mrpc', 'cola', 'copa', 'rte', 'rte_superglue', 'cb', 'wsc', 'wsc_bool']:
                 k = self.select_k_per_class
                 k_val = max(500, int(0.2*k)) if task!='sst2' else 400
@@ -396,9 +382,11 @@ class T5ContinualLearner:
 
             if self.get_test_subset:
                 dataloader_val, dataloader_test = dataloaders[0], dataloaders[1]
+                dataloader_val, dataloader_test = accelerator.prepare(dataloader_val), accelerator.prepare(dataloader_test)
                 tasks_data_dict[task]['val'] = dataloader_val
                 tasks_data_dict[task]['test'] = dataloader_test
             else:
+                dataloaders = accelerator.prepare(dataloaders)
                 tasks_data_dict[task]['val'] = dataloaders
 
             if task == 'multirc' and k_val==-1:
@@ -412,22 +400,42 @@ class T5ContinualLearner:
                           batch,
                           task=None,
                           progressive=True):
-        prefix_len = self.prefix_len
+
         model = self.model
         embed_prompt = self.prefix_MLPs!=None
         if embed_prompt:
             assert task!=None
             mlp = self.prefix_MLPs[task]
         tokenizer = self.tokenizer
-        import ipdb; ipdb.set_trace()
+        
         batch = {k: batch[k].to(self.device) for k in batch}
-        lm_labels = batch["target_ids"]
+        
+        lm_labels = batch["labels"]
         lm_labels[lm_labels[:, :] == tokenizer.pad_token_id] = -100
+        
+        input_ids = batch["input_ids"]
+        
+        batch_size = input_ids.shape[0]
+        sep_indices = (input_ids == tokenizer.sep_token_id).nonzero(as_tuple=True)[1]
+        # input_sequences = []
+        target_sequences = []
 
-        inputs_embeds = model.encoder.embed_tokens(batch["source_ids"])
-        pad_embed = model.encoder.embed_tokens.weight[tokenizer.pad_token_id].unsqueeze(0)
+        for i in range(batch_size):
+            sep_index = sep_indices[i].item()
+            # input_sequence = input_ids[i][:sep_index+1]
+            target_sequence = input_ids[i][sep_index:]
+            # input_sequences.append(input_sequence)
+            target_sequences.append(target_sequence)
+            
+        # source_ids = torch.stack(input_sequences, dim=0)
+        target_ids = torch.stack(target_sequences, dim=0)
+        # import ipdb; ipdb.set_trace()
+        target_embeds = model.get_input_embeddings()(target_ids)
 
-        k = inputs_embeds.shape[0]
+        inputs_embeds = model.get_input_embeddings()(input_ids)
+        pad_embed = model.get_input_embeddings().weight[tokenizer.pad_token_id].unsqueeze(0)
+
+        k = input_ids.shape[0]
 
         if embed_prompt:
             prompt = mlp(model.prompt)
@@ -437,79 +445,40 @@ class T5ContinualLearner:
         compression = True
         if compression:
             full_prefix_len = prompt.shape[0]
-            inputs_embeds_prompt = torch.concat([prompt.repeat(k, 1, 1), pad_embed.repeat(k, self.seq_len-full_prefix_len, 1)], axis=1)
-            
-        elif progressive:
-            inputs_embeds = torch.concat([prompt.repeat(k, 1, 1),
-                                          self.previous_prompts.repeat(k, 1, 1),
-                                          inputs_embeds], axis=1)[:,:self.seq_len]
-            full_prefix_len = self.previous_prompts.shape[0] + prompt.shape[0] # prefix including all previous tasks
-        else:
-            inputs_embeds = torch.concat([prompt.repeat(k, 1, 1),
-                                          inputs_embeds], axis=1)[:,:self.seq_len]
-            full_prefix_len = prompt.shape[0]
+            target_len = target_ids.shape[1]
+            inputs_embeds_prompt = torch.concat([prompt.repeat(k, 1, 1), target_embeds, pad_embed.repeat(k, self.seq_len-full_prefix_len-target_len, 1)], axis=1)
+            source_mask_prompt = torch.concat( (torch.ones(k,full_prefix_len).to(self.device), 
+                                    torch.zeros(k, self.seq_len-full_prefix_len).to(self.device)), axis=1)
+        # elif progressive:
+        #     inputs_embeds = torch.concat([prompt.repeat(k, 1, 1),
+        #                                   self.previous_prompts.repeat(k, 1, 1),
+        #                                   inputs_embeds], axis=1)[:,:self.seq_len]
+        #     full_prefix_len = self.previous_prompts.shape[0] + prompt.shape[0] # prefix including all previous tasks
+        # else:
+        #     inputs_embeds = torch.concat([prompt.repeat(k, 1, 1),
+        #                                   inputs_embeds], axis=1)[:,:self.seq_len]
+        #     full_prefix_len = prompt.shape[0]
 
-        # source_mask_updated = torch.concat( (batch["source_mask"][0][0].repeat(k,full_prefix_len),
-        #                                      batch["source_mask"]), axis=1)[:,:self.seq_len]
-        source_mask_prompt = torch.concat( (torch.ones(k,full_prefix_len).to(self.device), 
-                                            torch.zeros(k, self.seq_len-full_prefix_len).to(self.device)), axis=1)
+
         
-        # import ipdb; ipdb.set_trace()
-        # encoder_outputs = model.encoder(
-        #                         attention_mask=source_mask_updated,
-        #                         inputs_embeds=inputs_embeds,
-        #                         head_mask=None,  
-        #                         output_attentions=None,  
-        #                         output_hidden_states=None, 
-        #                         return_dict=None,  
-        #                     )
-        encoder_outputs_prompt = model.encoder(
-                                attention_mask=source_mask_prompt,
-                                inputs_embeds=inputs_embeds_prompt,
-                                head_mask=None,  
-                                output_attentions=None,  
-                                output_hidden_states=None, 
-                                return_dict=None,  
-                            )
-        encoder_outputs = model.encoder(
-                                attention_mask=batch["source_mask"],
-                                inputs_embeds=inputs_embeds,
-                                head_mask=None,  
-                                output_attentions=None,  
-                                output_hidden_states=None, 
-                                return_dict=None,  
-                            )
-        # outputs = model(
-        #     input_ids=batch["source_ids"],
-        #     attention_mask=source_mask_updated, 
-        #     labels=lm_labels,
-        #     decoder_attention_mask=batch['target_mask'],
-        #     encoder_outputs=encoder_outputs,
-        # )
+
         
         outputs_prompt = model(
-            input_ids=batch["source_ids"],
-            attention_mask=source_mask_prompt, 
-            labels=lm_labels,
-            decoder_attention_mask=batch['target_mask'],
-            encoder_outputs=encoder_outputs_prompt,
+            inputs_embeds=inputs_embeds_prompt,
+            attention_mask=source_mask_prompt,
         )
         outputs = model(
-            input_ids=batch["source_ids"],
-            attention_mask=batch["source_mask"], 
-            labels=lm_labels,
-            decoder_attention_mask=batch['target_mask'],
-            encoder_outputs=encoder_outputs,
+            inputs_embeds=inputs_embeds,
+            attention_mask=batch['attention_mask'],
         )
-        # loss = outputs[0]
-        
 
         logits_prompt = outputs_prompt.logits
         log_probs_prompt = torch.nn.functional.log_softmax(logits_prompt, dim=-1)
 
         # Calculate the log probability of the generated text
+        # import ipdb; ipdb.set_trace()
         log_probability_prompt = 0
-        for i, token_id in enumerate(batch['target_ids'][0][1:]):
+        for i, token_id in enumerate(target_ids[0][1:]):
             log_probability_prompt += log_probs_prompt[0, i, token_id].item()
 
 
@@ -518,7 +487,7 @@ class T5ContinualLearner:
 
         # Calculate the log probability of the generated text
         log_probability = 0
-        for i, token_id in enumerate(batch['target_ids'][0][1:]):
+        for i, token_id in enumerate(target_ids[0][1:]):
             log_probability += log_probs[0, i, token_id].item()
 
 
@@ -537,7 +506,7 @@ class T5ContinualLearner:
         lm_labels = batch["target_ids"]
         lm_labels[lm_labels[:, :] == tokenizer.pad_token_id] = -100
 
-        inputs_embeds = model.encoder.embed_tokens(batch["source_ids"])
+        inputs_embeds = model.get_input_embeddings()(batch["source_ids"])
         encoder_outputs = model.encoder(
                                 #input_ids=batch["source_ids"],
                                 attention_mask=batch["source_mask"],
@@ -632,60 +601,59 @@ class T5ContinualLearner:
         y_true, y_pred = [], []
         total_loss = 0
         for i, batch in enumerate(tqdm(dataloader_val)):
-            batch = {k:batch[k].to(self.device) for k in batch}
-            inputs_embeds = model.encoder.embed_tokens(batch["source_ids"]).to(self.device)
+
             if task in ['example']:
-                pad_embed = model.encoder.embed_tokens.weight[tokenizer.pad_token_id].unsqueeze(0)
-                lm_labels = batch["target_ids"]
+                batch = {k:batch[k].to(self.device) for k in batch}
+                
+                lm_labels = batch["labels"]
                 lm_labels[lm_labels[:, :] == tokenizer.pad_token_id] = -100
-                k = inputs_embeds.shape[0]
+                
+                input_ids = batch["input_ids"]
+                
+                batch_size = input_ids.shape[0]
+                sep_indices = (input_ids == tokenizer.sep_token_id).nonzero(as_tuple=True)[1]
+
+                target_sequences = []
+
+                for i in range(batch_size):
+                    sep_index = sep_indices[i].item()
+                    target_sequence = input_ids[i][sep_index:]
+                    target_sequences.append(target_sequence)
+                    
+                # source_ids = torch.stack(input_sequences, dim=0)
+                target_ids = torch.stack(target_sequences, dim=0)
+                # import ipdb; ipdb.set_trace()
+                target_embeds = model.get_input_embeddings()(target_ids)
+
+                inputs_embeds = model.get_input_embeddings()(input_ids)
+                pad_embed = model.get_input_embeddings().weight[tokenizer.pad_token_id].unsqueeze(0)
+
+                k = input_ids.shape[0]
                 
                 compression = True
                 if compression:
                     full_prefix_len = prompt.shape[0]
-                    inputs_embeds_prompt = torch.concat([prompt.repeat(k, 1, 1), pad_embed.repeat(k, self.seq_len-full_prefix_len, 1)], axis=1)
+                    target_len = target_ids.shape[1]
+                    inputs_embeds_prompt = torch.concat([prompt.repeat(k, 1, 1), target_embeds, pad_embed.repeat(k, self.seq_len-full_prefix_len-target_len, 1)], axis=1)
+                    source_mask_prompt = torch.concat( (torch.ones(k,full_prefix_len).to(self.device), 
+                                            torch.zeros(k, self.seq_len-full_prefix_len).to(self.device)), axis=1)
 
-                source_mask_prompt = torch.concat( (torch.ones(k,full_prefix_len).to(self.device), 
-                                                    torch.zeros(k, self.seq_len-full_prefix_len).to(self.device)), axis=1)
-                
-                # import ipdb; ipdb.set_trace()
-                encoder_outputs_prompt = model.encoder(
-                                        attention_mask=source_mask_prompt,
-                                        inputs_embeds=inputs_embeds_prompt,
-                                        head_mask=None,  
-                                        output_attentions=None,  
-                                        output_hidden_states=None, 
-                                        return_dict=None,  
-                                    )
-                encoder_outputs = model.encoder(
-                                        attention_mask=batch["source_mask"],
-                                        inputs_embeds=inputs_embeds,
-                                        head_mask=None,  
-                                        output_attentions=None,  
-                                        output_hidden_states=None, 
-                                        return_dict=None,  
-                                    )
                 outputs_prompt = model(
-                    input_ids=batch["source_ids"],
-                    attention_mask=source_mask_prompt, 
-                    labels=lm_labels,
-                    decoder_attention_mask=batch['target_mask'],
-                    encoder_outputs=encoder_outputs_prompt,
+                    inputs_embeds=inputs_embeds_prompt,
+                    attention_mask=source_mask_prompt,
                 )
                 outputs = model(
-                    input_ids=batch["source_ids"],
-                    attention_mask=batch["source_mask"], 
-                    labels=lm_labels,
-                    decoder_attention_mask=batch['target_mask'],
-                    encoder_outputs=encoder_outputs,
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=batch['attention_mask'],
                 )
 
                 logits_prompt = outputs_prompt.logits
                 log_probs_prompt = torch.nn.functional.log_softmax(logits_prompt, dim=-1)
 
                 # Calculate the log probability of the generated text
+                # import ipdb; ipdb.set_trace()
                 log_probability_prompt = 0
-                for i, token_id in enumerate(batch['target_ids'][0][1:]):
+                for i, token_id in enumerate(target_ids[0][1:]):
                     log_probability_prompt += log_probs_prompt[0, i, token_id].item()
 
 
@@ -694,14 +662,16 @@ class T5ContinualLearner:
 
                 # Calculate the log probability of the generated text
                 log_probability = 0
-                for i, token_id in enumerate(batch['target_ids'][0][1:]):
+                for i, token_id in enumerate(target_ids[0][1:]):
                     log_probability += log_probs[0, i, token_id].item()
 
 
                 loss = kl_div(log_probs_prompt, log_probs, reduction='batchmean', log_target=True)
 
+
+
                 total_loss += loss.item()
-                total += batch['source_ids'].shape[0]
+                total += batch['input_ids'].shape[0]
                 continue
 
             if prompt!=None:
@@ -892,7 +862,7 @@ class T5ContinualLearner:
 
 
             for i, batch in enumerate(tqdm(dataloader_train)):
-                batch = {k:batch[k].to('cuda') for k in batch}
+                # batch = {k:batch[k].to('cuda') for k in batch}
 
                 if self.prefix_len>0: # prompt tuning
                     loss = self.train_step_lester(batch,
@@ -901,7 +871,8 @@ class T5ContinualLearner:
                 else:
                     loss = self.train_step(batch)
 
-                loss.backward()
+                # loss.backward()
+                accelerator.backward(loss)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 

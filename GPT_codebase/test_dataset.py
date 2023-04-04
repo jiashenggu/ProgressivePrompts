@@ -1,13 +1,14 @@
-import t5_dataset
-from transformers import T5Tokenizer
+import gpt_dataset
+from transformers import AutoTokenizer
 import datasets
 import pandas as pd
-model_name = 't5-small'
+model_name = 'gpt2'
 task = 'example'
-tokenizer = T5Tokenizer.from_pretrained(model_name)
-ds = t5_dataset.T5Dataset(tokenizer, task)
-example_dataset = ds.get_final_ds(task, split='train', batch_size=2)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+ds = gpt_dataset.GPTDataset(tokenizer, task)
+example_dataset = ds.get_final_ds(task, split='train', batch_size=2, k=2)
 
+import ipdb; ipdb.set_trace()
 for batch in example_dataset:
     print(batch)
     break

@@ -1,106 +1,36 @@
 import pandas as pd
 import numpy as np
-
+import torch
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 import datasets
 
 
-class T5Dataset:
+class GPTDataset:
     def __init__(self, tokenizer, task):
-        """Dataset class for T5 model experiments.
+        """Dataset class for gpt model experiments.
         Args:
             task (str): Name of the downstream task.
-            tokenizer (HuggingFace Tokenizer): T5 model tokenizer to use.
+            tokenizer (HuggingFace Tokenizer): gpt model tokenizer to use.
         """
         
         self.tokenizer = tokenizer
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.add_special_tokens({'sep_token': '<SEP>'})
+
         self.glue_datasets = ['cola', 'sst2', 'mrpc', 'qqp', 'stsb', 'mnli', \
                               'mnli_mismatched', 'mnli_matched', 'qnli', 'rte', 'wnli', 'ax']
         self.superglue_datasets = ['copa', 'boolq', 'wic', 'wsc', 'cb', 'record', 'multirc', 'rte_superglue', 'wsc_bool']
         
         # Column keys used in the dataset
         self.task_to_keys = {
-            "cola": ("sentence", None),
-            "mnli": ("premise", "hypothesis"),
-            "mnli-mm": ("premise", "hypothesis"),
-            "mrpc": ("sentence1", "sentence2"),
-            #"qnli": ("question", "sentence"),
-            "qnli": ("text1", "text2"),
-            "qqp": ("question1", "question2"),
-            "rte": ("sentence1", "sentence2"),
-            "sst2": ("sentence", None),
-            "stsb": ("sentence1", "sentence2"),
-            "wnli": ("sentence1", "sentence2"),
-
-            "boolq": ("passage", "question"),
-            "copa": ('choice1', 'choice2', 'premise', 'question'),
-            "wic": ("start1", "end1", "sentence1", "start2", "end2", "sentence2", "word"),
-            "wsc": ("span1_text", "span1_index", "span2_text", "span2_index", "text"),
-            "wsc_bool": ("span1_text", "span1_index", "span2_text", "span2_index", "text"),
-            "cb": ("premise", "hypothesis"),
-            "record": ("passage", "query", "entities"),
-            "multirc": ("question", "answer", "paragraph"),
-            "rte_superglue": ("premise", "hypothesis"),
-
-            "scicite": ("sectionName", "string"),
-            "imdb": ("text", None),
-
-            "ag_news": ("text", None),
-            "yelp_review_full": ("text", None),
-            "yahoo_answers_topics": ("question_content", "best_answer"),
-            "dbpedia_14": ("title", "content"),
-
-            "ag": ("content", None),
-            "yelp": ("content", None),
-            "yahoo": ("content", None),
-            "dbpedia": ("content", None),
             "amazon": ("content", None),
             "example": ("prompt", None),
         }
         
-        # Label text for T5 tasks
-        # (T5 has text-to-text format for text and labels)
+        # Label text for gpt tasks
+        # (gpt has text-to-text format for text and labels)
         self.task_to_labels = {
-            "cola": ("not_acceptable", "acceptable"),
-            "mnli": ("entailment", "neutral", "contradiction"),
-            "mnli-mm": (),
-            "mrpc": ("not_equivalent", "equivalent"),
-            "qnli": ("entailment", "not_entailment"),
-            "qqp": ("not_duplicate", "duplicate"),
-            "rte": ("entailment", "not_entailment"),
-            "sst2": ("negative", "positive"),
-            "stsb": (),
-            "wnli": (),
-
-            "boolq": ("false", "true"),
-            "copa": ("false", "true"),
-            "wic": ("false", "true"),
-            "wsc_bool": ("false", "true"),
-            "cb": ("entailment", "contradiction", "neutral"),
-            "multirc": ("false", "true"),
-            "rte_superglue": ("entailment", "not_entailment"),
-
-            "scicite": (),
-            "imdb": ("negative", "positive"),
-
-            "ag_news": ("world", "sports", "business", "science"),
-            "yelp_review_full": ("terrible", "bad", "middle", "good", "wonderful"),
-            "yahoo_answers_topics": ("society and culture", "science", "health", "education and reference",
-                                     "computers and internet", "sports", "business", "entertainment and music",
-                                     "family and relationships", "politics and government"),
-            "dbpedia_14": ("company", "educationalinstitution", "artist", "athlete", "officeholder",
-                           "meanoftransportation", "building", "naturalplace", "village", "animal",
-                           "plant", "album", "film", "writtenwork"),
-
-            "ag": ("world", "sports", "business", "science"),
-            "yelp": ("terrible", "bad", "middle", "good", "wonderful"),
-            "yahoo": ("society and culture", "science", "health", "education and reference",
-                      "computers and internet", "sports", "business", "entertainment and music",
-                      "family and relationships", "politics and government"),
-            "dbpedia": ("company", "educationalinstitution", "artist", "athlete", "officeholder",
-                        "meanoftransportation", "building", "naturalplace", "village", "animal",
-                        "plant", "album", "film", "writtenwork"),
             "amazon": ("terrible", "bad", "middle", "good", "wonderful"),
             "example": ("terrible", "bad", "middle", "good", "wonderful"),
         }
@@ -180,30 +110,20 @@ class T5Dataset:
         if len(prefix_list)>0:
             text = (' ').join(prefix_list) + ' ' + text
         
-        source = tokenizer(text.strip()+' </s>',
-                          truncation=True,
-                          #padding=False,
-                          padding='max_length',
-                          max_length=max_length)
+
         if task == 'example':
             target = examples['content']
-        elif task=='stsb':
-            target = str(examples[label_key])[:3]
-        elif task=='record':
-            target = '; '.join(examples[label_key])
-        elif task=='wsc':
-            pass # already obtained target
-        else:
-            target = self.task_to_labels[task][examples[label_key]]
-        target += ' </s>'
-        target = tokenizer(
-                  target, max_length=max_length_target, pad_to_max_length=True, #return_tensors="pt"
-                )
         # import ipdb; ipdb.set_trace()
-        dict_final = {"source_ids": source['input_ids'],
-                      "source_mask": source['attention_mask'],
-                      "target_ids": target['input_ids'],
-                      "target_mask": target['attention_mask']}
+        full_text = tokenizer.bos_token + text + tokenizer.sep_token + target + tokenizer.eos_token
+        encodings_dict = tokenizer(full_text,                                   
+                                   truncation=True, 
+                                   max_length=max_length, 
+                                   padding="max_length")   
+        input_ids = encodings_dict['input_ids']
+        attention_mask = encodings_dict['attention_mask']
+        dict_final =    {'labels': torch.tensor(input_ids),
+                        'input_ids': torch.tensor(input_ids), 
+                        'attention_mask': torch.tensor(attention_mask)}
         return dict_final
 
 
@@ -218,7 +138,7 @@ class T5Dataset:
                      target_len=2,
                      max_length=512,
                      prefix_list=[]):
-        """Function that returns final T5 dataloader.
+        """Function that returns final gpt dataloader.
         Args:
             task (str): Name of the downstream task.
             split (str): Which data split to use (train/validation/test).
@@ -242,41 +162,7 @@ class T5Dataset:
             df['prompt'] = "Frank and Cindy are bakers in the city of Paris, France. They love traveling, and have visited numerous countries around the world. They enjoy cruises, hiking, and visiting cities with history and flair. Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. They have not visited Africa, but hope to someday. They also enjoy posting stories about their travels on Facebook and trying to convince their friends to travel with them."
             df['label'] = df['label'] - 1
             dataset = datasets.Dataset.from_pandas(df)
-        elif task in ['amazon']: # amazon not available with hugging face
-            df = pd.read_csv('../datasets/src/data/'+task+'/'+split+'.csv', header=None)
-            df = df.rename(columns={0: "label", 1: "title", 2: "content"})
-            df['label'] = df['label'] - 1
-            dataset = datasets.Dataset.from_pandas(df)
-        elif task == 'mnli':
-            dataset = load_dataset('LysandreJik/glue-mnli-train', split=split)
-        elif task == 'qnli':
-            dataset = load_dataset('SetFit/qnli', split=split)
-        elif task == 'stsb':
-            dataset = load_dataset('stsb_multi_mt', name='en', split=split if split=='train' else 'dev')
-        else:
-            if task not in self.glue_datasets and task not in self.superglue_datasets:
-                dataset = load_dataset(task, split=split)
-            else:
-                benchmark = 'glue' if task not in self.superglue_datasets else 'super_glue'
-                dataset = load_dataset(benchmark,
-                                       task.replace('_superglue', '').replace('_bool', ''),
-                                       split=split)
 
-        # For yahoo dataset we need to filter out empty rows 
-        # (i.e. where "question" field is empty)
-        if self.task == "yahoo_answers_topics":
-            if split=='train':
-                good_id = np.load('good_id_yahoo_train.npy')
-                dataset = dataset.select(good_id)
-            elif split=='test':
-                good_id = np.load('good_id_yahoo_test.npy')
-                dataset = dataset.select(good_id)
-        
-        # Using Lester et al. setting for WSC task, e.g.
-        # using only positive samples (for output generation)
-        if self.task == 'wsc': 
-            idx = np.where(np.array(dataset['label']) == 1)[0]
-            dataset = dataset.select(idx)
         
         # Selecting k subset of the samples (if requested)
         if k!=-1:
@@ -297,8 +183,7 @@ class T5Dataset:
                                                                             max_length_target=target_len,
                                                                             prefix_list=prefix_list),
                                           batched=False)
-            encoded_dataset.set_format(type='torch', columns=['source_ids', 'source_mask',
-                                                              'target_ids', 'target_mask'])
+            encoded_dataset.set_format(type='torch', columns=['labels','input_ids', 'attention_mask'])
             dataloader = DataLoader(encoded_dataset, batch_size=batch_size)
 
             return dataloader
@@ -316,8 +201,7 @@ class T5Dataset:
                                                                                  max_length_target=target_len,
                                                                                  prefix_list=prefix_list),
                                               batched=False)
-                encoded_dataset.set_format(type='torch', columns=['source_ids', 'source_mask',
-                                                                  'target_ids', 'target_mask'])
+                encoded_dataset.set_format(type='torch', columns=['labels','input_ids', 'attention_mask'])
                 dataloader = DataLoader(encoded_dataset, batch_size=batch_size)
                 dataloaders_val_test.append(dataloader)
 

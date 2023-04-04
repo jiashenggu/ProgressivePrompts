@@ -165,12 +165,34 @@ srun -n 1 -w c59 --pty /bin/bash
 
 export HF_DATASETS_CACHE=/mnt/beegfs/jiasheng/new_datasets
 export TRANSFORMERS_CACHE=/mnt/beegfs/jiasheng/new_cache
+
 python train_t5_cl.py --task_list imdb cb sst2 dbpedia_14 --select_k_per_class 1000 \
 --lr 0.3 --num_epochs 10 --freeze_weights 1 --prefix_len 10 \
 --model_name t5-large --early_stopping 1 \
 --save_name T5_experiment --save_dir /mnt/beegfs/jiasheng/progressiveprompts_save
 
-python train_t5_cl.py --task_list example --select_k_per_class 1000 \
---lr 0.3 --num_epochs 300 --freeze_weights 1 --prefix_len 64 \
+CUDA_VISIBLE_DEVICES=3 python train_t5_cl.py --task_list example --select_k_per_class 10  --progressive 0 \
+--lr 0.1 --num_epochs 1 --freeze_weights 1 --prefix_len 64 \
 --model_name google/flan-t5-base --early_stopping 1 \
 --save_name T5_experiment --save_dir /mnt/beegfs/jiasheng/progressiveprompts_save
+
+ssh-add ~/.ssh/id_ed25519
+
+
+hard prompt: Frank and Cindy are bakers in the city of Paris, France. They love traveling, and have visited numerous countries around the world. They enjoy cruises, hiking, and visiting cities with history and flair. Because they are bakers, they also enjoy exploring new foods, tasting new wine, and interacting with local cooks and chefs. Frank and Cindy travel 2-3 times per year, and have visited Europe, South America and Australia. They have not visited Africa, but hope to someday. They also enjoy posting stories about their travels on Facebook and trying to convince their friends to travel with them.
+input_text: Now repeat the text:
+decoded_output: The narrator tries to get the narrator to eat a lot of food. The narrator tries to eat a lot of food. The narrator tries to eat a lot of food.
+
+python train_gpt_cl.py \
+--task_list example \
+--select_k_per_class 10 \
+--progressive 0 \
+--lr 0.1 \
+--num_epochs 30 \
+--freeze_weights 1 \
+--prefix_len 64 \
+--model_name gpt2-large \
+--early_stopping 1 \
+--batch_size 4 \
+--save_name GPT_experiment \
+--save_dir /mnt/beegfs/jiasheng/progressiveprompts_save
